@@ -1,4 +1,11 @@
-from commands import Commands
+import sys
+import logging
+import site
+logging.error(site)
+logging.error(sys.path)
+
+logging.basicConfig(level=logging.DEBUG)
+
 import threading
 import serial
 import struct
@@ -7,36 +14,146 @@ from functools import wraps
 import errno
 import os
 import signal
-import logging
+import math
+import struct
+import traceback
 
-__all__ = ['CCNET']
 
-logging.basicConfig(
-    filename='/tmp/ccnet_py.tmp', filemode='w+', level=logging.DEBUG)
+def return_buffer(data):
+    def func():
+        return data
+    return func
+
+
+def data_proxy(data):
+    return data
+
+
+def check_error(data):
+    if not data:
+        return "No response"
+
+    data = struct.unpack('b', data)
+    if data[0] == 0:
+        return "Done"
+    elif data[0] == 255:
+        return "Error"
+    else:
+        return "Unknown response"
+
+
+def get_status_response(data):
+    return {
+        'enabledBills': bytes.fromhex(data[0:3]),
+        'highSecurity': bytes.fromhex(data[3:6]),
+    }
+
+
+def enable_bill_types_request(data):
+    return '34'+''.join(["%02X" % x for x in data]).strip()
+    # bytearray.fromhexdata.decode('hex')
+
+
+def identification_response(data):
+    return {
+        'Part': str(data[0:15]).strip(),
+        'Serial': str(data[15:27]).strip(),
+        'Asset': data[27:34],
+    }
+
+
+def get_bill_table_response(data):
+    data = bytearray(data)
+    response = []
+    for i in range(0, 23):
+        word = data[i*5:i*5+5]
+        cur_nom = word[0]
+        cur_pow = word[4]
+        response.append({
+            'amount': cur_nom * math.pow(10, cur_pow),
+            'code': str(word[1:4]),
+        })
+    return response
+
+comamnds_dict = {
+    'RESET':                [return_buffer('30'), check_error],
+    'GET STATUS':           [return_buffer('31'), get_status_response],
+    'SET SECURITY':         [return_buffer('32'), data_proxy],
+    'POLL':                 [return_buffer('33'), data_proxy],
+    'ENABLE BILL TYPES':    [enable_bill_types_request, check_error],
+    'STACK':                [return_buffer('35'), data_proxy],
+    'RETURN':               [return_buffer('36'), data_proxy],
+    'IDENTIFICATION':       [return_buffer('37'), identification_response],
+    'HOLD':                 [return_buffer('38'), data_proxy],
+    'SET BARCODE PARAMETERS': [return_buffer('39'), data_proxy],
+    'EXTRACT BARCODE DATA': [return_buffer('3A'), data_proxy],
+    'GET BILL TABLE':       [return_buffer('41'), get_bill_table_response],
+    'DOWNLOAD':             [return_buffer('50'), data_proxy],
+    'GET CRC32 OF THE CODE': [return_buffer('51'), data_proxy],
+    'REQUEST STATISTICS':   [return_buffer('60'), data_proxy],
+    'ACK':   [return_buffer('00'), data_proxy],
+}
+
+
+class req_res(object):
+    def __init__(self, command):
+        self.request = comamnds_dict[command][0]
+        self.response = comamnds_dict[command][1]
+
+
+class Commands(object):
+    def __call__(self, command):
+        return req_res(command)
 
 
 class TimeoutError(Exception):
     pass
 
+#def timeout(seconds=30, error_message=os.strerror(errno.ETIME)):
+#    def decorator(func):
+#        def _handle_timeout(signum, frame):
+#            raise TimeoutError(error_message)
+
+#        def wrapper(*args, **kwargs):
+#            result = False
+#            signal.signal(signal.SIGALRM, _handle_timeout)
+#            signal.alarm(seconds)
+#            try:
+#                result = func(*args, **kwargs)
+#            finally:
+#                signal.alarm(0)
+#            return result
+
+#        return wraps(func)(wrapper)
+
+#    return decorator
+
+import ctypes
+
 
 def timeout(seconds=30, error_message=os.strerror(errno.ETIME)):
     def decorator(func):
-        def _handle_timeout(signum, frame):
-            raise TimeoutError(error_message)
-
         def wrapper(*args, **kwargs):
-            result = False
-            signal.signal(signal.SIGALRM, _handle_timeout)
-            signal.alarm(seconds)
-            try:
+
+            result = None
+
+            def runner():
+                nonlocal result
                 result = func(*args, **kwargs)
-            finally:
-                signal.alarm(0)
+                return result
+
+            t = threading.Thread(target=runner)
+            t.start()
+            t.join(seconds)
+            if t.is_alive():
+                ctypes.pythonapi.PyThreadState_SetAsyncExc(t.ident, ctypes.py_object(TimeoutError))
+                raise TimeoutError(error_message)
+
             return result
 
-        return wraps(func)(wrapper)
-
+        return wrapper
     return decorator
+
 
 
 # cmd('POLL').request()
@@ -83,12 +200,13 @@ class CCNET(object):
         self.connection.open()
         try:
             if self.execute('RESET') == "Done":
-                while self.execute('POLL')[0] is not 0x19:
+                while self.execute('POLL')[0] != 0x19:
                     threading.Event().wait(0.1)
                 self.identification()
             else:
                 raise Exception('Reset Error')
         except Exception as e:
+            traceback.print_exc()
             logging.error("Connection: " + str(e))
             return False
         return True
@@ -105,10 +223,14 @@ class CCNET(object):
     def escrow(self):
         try:
             data = self.wait_state(0x80, dt=True)
-            return self.billTable[data]
-        except Exception as e:
+            if data:
+                return self.billTable[data]
+        except TimeoutError as e:
             logging.error('ERR Escrow ' + str(e))
             return False
+        except Exception as e:
+            logging.error('ERR Escrow ' + str(e))
+            raise e
 
     def stack(self):
         logging.debug("Start stacking")
@@ -125,7 +247,7 @@ class CCNET(object):
     def getState(self, h=False, dt=False):
         state = self.state
         try:
-            resp = self.execute('POLL')
+            resp = self.execute('POLL') or ''
             self.execute('ACK')
             self.state = resp[0]
         except:
@@ -142,27 +264,25 @@ class CCNET(object):
     def wait_state(self, state=0x14, dt=False):
         logging.debug("Wait for state:" + str(self.states[state]))
         if dt:
-            while True:
-                dt = self.getState(dt=True)  # Update self.state and get data
-                if self.state is state:
-                    return dt
-                threading.Event().wait(0.1)
+            dt = self.getState(dt=True)  # Update self.state and get data
+            if self.state == state:
+                return dt
         else:
-            while True:
-                if self.getState() is state:
-                    return True
-                threading.Event().wait(0.1)
+            if self.getState() == state:
+                return True
+        threading.Event().wait(0.1)
 
-    def end(self, billsEnable=(0x00, 0x00, 0x00, 0x00, 0x00, 0xFF)):
+    def end(self, billsEnable=(0x00, 0x00, 0x00, 0x00, 0x00, 0xff)):
         self.execute('ENABLE BILL TYPES', billsEnable)
 
     @timeout(10)
     def execute(self, command, data=None):
-        if command is not "POLL":  # No pool debug, because Inf/0.1s loop
+        logging.error(command)
+        if command != "POLL":  # No pool debug, because Inf/0.1s loop
             logging.debug("Execute: " + str(command) + "[" + str(data) + "]")
         if (self.busy):
             return
-        no_response = True if command is "ACK" else False
+        no_response = (command == "ACK")
         if data is None:
             r = self.__send_command(
                 self.cmd(command).request(), no_response=no_response)
@@ -173,13 +293,16 @@ class CCNET(object):
 
     @timeout(30)
     def __send_command(self, command, no_response=False):
+        logging.error(command)
         self.busy = True
         try:
             cmmd = ''.join([
                 self.sync, self.deviceType, self.getLenght(command), command])
-            self.connection.write((cmmd + self.getCRC16(cmmd)).decode('hex'))
+            logging.error(cmmd)
+            logging.error(self.getCRC16(cmmd))
+            self.connection.write(bytes.fromhex(cmmd + self.getCRC16(cmmd)))
         except serial.SerialTimeoutException:
-            print "timeout"
+            logging.error("timeout")
         except Exception as e:
                 raise e
         if no_response:
@@ -188,7 +311,7 @@ class CCNET(object):
         try:
             response = self.connection.read(3)
             response += self.connection.read(
-                int(str(response[2]).encode('hex'), 16) - 3)
+                response[2] - 3)
             self.busy = False
             return self.checkResponse(response)
         except Exception as e:
@@ -213,12 +336,12 @@ class CCNET(object):
                     CRC ^= 0x8408
                 else:
                     CRC >>= 1
-        CRC = format(CRC, '02x')
-        return CRC[2:4] + CRC[0:2]
+        logging.error(CRC)
+        return CRC.to_bytes(2,'little').hex()
 
     @staticmethod
     def getLenght(cmd):
-        ret = "%X" % (len(cmd)/2 + 5)
+        ret = "%X" % (len(cmd)//2 + 5)
         if len(ret) < 2:
             ret = '0' + ret
         return ret
@@ -228,8 +351,8 @@ class CCNET(object):
         if resp[0] != int(self.sync) or resp[1] != int(self.deviceType):
             raise Exception(
                 "Wrong response target" +
-                rsp[0].encode('hex') +
-                rsp[1].encode('hex'))
+                rsp[0].hex() +
+                rsp[1].hex())
 
         CRC = binascii.hexlify(resp[-2:])
         command = resp[0:-2]
@@ -239,3 +362,5 @@ class CCNET(object):
         #     "////" + self.getCRC16(command, False)
         #     "////" + binascii.hexlify(command))
         return data
+
+logging.error('loaded')
