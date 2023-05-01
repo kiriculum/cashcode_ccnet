@@ -1,3 +1,5 @@
-Python CCNET adapter for CashCode bill validator.
+Python CCNET controller driver for CashCode Bill Validator.
 
-Ported to Python3
+
+## Listing ports
+`python -m serial.tools.list_ports` will print a list of available ports.
