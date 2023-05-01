@@ -1,1 +1,1 @@
-__all__ = ['ccnet']
+from .ccnet import CCNET

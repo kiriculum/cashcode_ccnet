@@ -5,7 +5,7 @@ from enum import Enum
 
 
 def threaded(func):
-    def wrapper(timeout, *args, **kwargs) -> None | bytes:
+    def wrapper(_self, timeout=10, *args, **kwargs) -> None | bytes:
         result = None
 
         def runner():
@@ -25,20 +25,13 @@ def threaded(func):
     return wrapper
 
 
-def get_status_response(data: bytes):
-    return {
-        'Enabled bills': data[0:3].hex(),
-        'High security bills': data[3:6].hex(),
-    }
-
-
 @dataclass
 class Bill:
     amount: int
     code: str
 
 
-accepted_bills = {  # bill bit number: bill name
+accepted_bills = {  # bill bit number: Bill
     2: Bill(10, 'RUS'),
     3: Bill(50, 'RUS'),
     4: Bill(100, 'RUS'),
