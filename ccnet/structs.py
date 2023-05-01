@@ -5,12 +5,12 @@ from enum import Enum
 
 
 def threaded(func):
-    def wrapper(_self, timeout=10, *args, **kwargs) -> None | bytes:
+    def wrapper(self, timeout=10, *args, **kwargs) -> None | bytes:
         result = None
 
         def runner():
             nonlocal result
-            result = func(*args, **kwargs)
+            result = func(self, *args, **kwargs)
             return result
 
         t = threading.Thread(target=runner)

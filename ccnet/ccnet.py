@@ -3,7 +3,6 @@ import time
 
 import serial
 
-from config import baudrate, serial_timeout
 from .structs import State, Command, accepted_bills, threaded, Device, Bill
 
 
@@ -18,7 +17,7 @@ class CCNET(object):
     cur_bill: Bill | None = None
     device = Device('', '', b'')
 
-    def __init__(self, port):
+    def __init__(self, port, baudrate, serial_timeout):
         self._serial = serial.Serial(baudrate=baudrate, timeout=serial_timeout)
         self._serial.port = port
 
@@ -115,7 +114,7 @@ class CCNET(object):
 
     def _move_bill(self, command: Command, state: State) -> Bill | None:
         if self.state is State.ACCEPTING:
-            self._wait_states(timeout=5, state=[State.ESCROWPOSITION])
+            self._wait_states(5, [State.ESCROWPOSITION])
         if self.state not in [State.ESCROWPOSITION, State.HOLDING]:
             logging.error('Device not in ESCROW or HOLDING state')
             return
@@ -123,7 +122,7 @@ class CCNET(object):
         if Command(data[0:1]) is not Command.ACK:
             logging.error(f'Got bad response for {command.name} command: ', data)
             return
-        self._wait_states(timeout=30, states=[state])
+        self._wait_states(30, [state])
         if self.state is not state:
             logging.error(f'Have not got {state.name} state')
             return
